@@ -638,7 +638,7 @@ class Phi3ALiBiAttention(Phi3Attention):
 
     def _get_alibi_slopes(self, num_heads):
         # Generate slopes for ALiBi
-        slopes = torch.tensor([2 ** (-i / num_heads) for i in range(num_heads)])
+        slopes = torch.tensor([2 ** (-i / num_heads) for i in range(num_heads)], device='cpu')
         return slopes
 
     def forward(
@@ -668,7 +668,7 @@ class Phi3ALiBiAttention(Phi3Attention):
             kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
 
         # Apply ALiBi bias
-        alibi = self.alibi_slopes[:, None, None] * torch.arange(kv_seq_len, device=key_states.device)[None, None, :]
+        alibi = self.alibi_slopes.to(key_states.device)[:, None, None] * torch.arange(kv_seq_len, device=key_states.device)[None, None, :]
         alibi = alibi.expand(bsz, -1, -1, -1)
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
@@ -698,6 +698,7 @@ class Phi3ALiBiAttention(Phi3Attention):
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
+
 # copied from transformers.models.llama.modeling_llama.LlamaSdpaAttention with Llama->Phi3
 # TODO @Arthur no longer copied from LLama after static cache
 class Phi3SdpaAttention(Phi3Attention):
