@@ -356,82 +356,7 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
-###Define the ALiBi Attention Class
-class Phi3AlibiAttention(Phi3Attention):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.alibi_biases = None
 
-    def get_slopes(self, n_heads: int):
-        n = 2 ** math.floor(math.log2(n_heads))
-        m_0 = 2.0 ** (-8.0 / n)
-        m = torch.pow(m_0, torch.arange(1, 1 + n))
-        if n < n_heads:
-            m_hat_0 = 2.0 ** (-4.0 / n)
-            m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (n_heads - n), 2))
-            m = torch.cat([m, m_hat])
-        return m
-
-    @torch.no_grad()
-    def get_alibi_biases(self, n_heads: int, mask: torch.Tensor):
-        m = self.get_slopes(n_heads).to(mask.device)
-        distance = mask.cumsum(dim=-1)
-        return distance[:, :, None] * m[None, None, :]
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Cache] = None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        bsz, q_len, _ = hidden_states.size()
-
-        qkv = self.qkv_proj(hidden_states)
-        query_pos = self.num_heads * self.head_dim
-        query_states = qkv[..., :query_pos]
-        key_states = qkv[..., query_pos : query_pos + self.num_key_value_heads * self.head_dim]
-        value_states = qkv[..., query_pos + self.num_key_value_heads * self.head_dim :]
-
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-        kv_seq_len = key_states.shape[-2]
-        if past_key_value is not None:
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-
-        cos, sin = self.rotary_emb(value_states, position_ids, seq_len=kv_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-
-        if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
-
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        if attention_mask is not None:
-            if self.alibi_biases is None or self.alibi_biases.shape[1] < q_len:
-                self.alibi_biases = self.get_alibi_biases(attn_weights.shape[-1], attention_mask[:, :, 0, 0])
-            attn_weights += self.alibi_biases[:q_len, :q_len, None, :]
-
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(value_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
-
-        attn_output = torch.matmul(attn_weights, value_states)
-        attn_output = attn_output.transpose(1, 2).contiguous().reshape(bsz, q_len, self.hidden_size)
-        attn_output = self.o_proj(attn_output)
-
-        if not output_attentions:
-            attn_weights = None
-
-        return attn_output, attn_weights, past_key_value
 
 class Phi3Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
@@ -557,6 +482,82 @@ class Phi3Attention(nn.Module):
 
         return attn_output, attn_weights, past_key_value
 
+###Define the ALiBi Attention Class
+class Phi3AlibiAttention(Phi3Attention):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.alibi_biases = None
+
+    def get_slopes(self, n_heads: int):
+        n = 2 ** math.floor(math.log2(n_heads))
+        m_0 = 2.0 ** (-8.0 / n)
+        m = torch.pow(m_0, torch.arange(1, 1 + n))
+        if n < n_heads:
+            m_hat_0 = 2.0 ** (-4.0 / n)
+            m_hat = torch.pow(m_hat_0, torch.arange(1, 1 + 2 * (n_heads - n), 2))
+            m = torch.cat([m, m_hat])
+        return m
+
+    @torch.no_grad()
+    def get_alibi_biases(self, n_heads: int, mask: torch.Tensor):
+        m = self.get_slopes(n_heads).to(mask.device)
+        distance = mask.cumsum(dim=-1)
+        return distance[:, :, None] * m[None, None, :]
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Cache] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        cache_position: Optional[torch.LongTensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        bsz, q_len, _ = hidden_states.size()
+
+        qkv = self.qkv_proj(hidden_states)
+        query_pos = self.num_heads * self.head_dim
+        query_states = qkv[..., :query_pos]
+        key_states = qkv[..., query_pos : query_pos + self.num_key_value_heads * self.head_dim]
+        value_states = qkv[..., query_pos + self.num_key_value_heads * self.head_dim :]
+
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+        kv_seq_len = key_states.shape[-2]
+        if past_key_value is not None:
+            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+
+        cos, sin = self.rotary_emb(value_states, position_ids, seq_len=kv_seq_len)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+
+        if past_key_value is not None:
+            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+
+        if attention_mask is not None:
+            if self.alibi_biases is None or self.alibi_biases.shape[1] < q_len:
+                self.alibi_biases = self.get_alibi_biases(attn_weights.shape[-1], attention_mask[:, :, 0, 0])
+            attn_weights += self.alibi_biases[:q_len, :q_len, None, :]
+
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(value_states.dtype)
+        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+
+        attn_output = torch.matmul(attn_weights, value_states)
+        attn_output = attn_output.transpose(1, 2).contiguous().reshape(bsz, q_len, self.hidden_size)
+        attn_output = self.o_proj(attn_output)
+
+        if not output_attentions:
+            attn_weights = None
+
+        return attn_output, attn_weights, past_key_value
 
 class Phi3FlashAttention2(Phi3Attention):
     """
@@ -807,7 +808,7 @@ PHI3_ATTENTION_CLASSES = {
     "eager": Phi3Attention,
     "flash_attention_2": Phi3FlashAttention2,
     "sdpa": Phi3SdpaAttention,
-    "alibi": Phi3AlibiAttention,  #Ability to use Alibi attention
+    "alibi": Phi3AlibiAttention,  #Ability to use Alibi
 }
 
 
