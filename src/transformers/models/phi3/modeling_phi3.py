@@ -805,10 +805,10 @@ class Phi3SdpaAttention(Phi3Attention):
 
 
 PHI3_ATTENTION_CLASSES = {
-    "eager": Phi3Attention,
+    "eager": Phi3AlibiAttention,
     "flash_attention_2": Phi3FlashAttention2,
     "sdpa": Phi3SdpaAttention,
-    "alibi": Phi3AlibiAttention,  #Ability to use Alibi
+    # "alibi": ,  #Ability to use Alibi
 }
 
 
